@@ -1,0 +1,15 @@
+fastapi
+uvicorn[standard]
+sse-starlette
+langchain
+langgraph
+transformers
+torch
+faiss-cpu
+rank-bm25
+pymupdf
+pydantic
+python-dotenv
+loguru
+httpx
+aiofiles

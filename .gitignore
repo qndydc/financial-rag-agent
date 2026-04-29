@@ -1,0 +1,50 @@
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.env
+
+# 模型 & 向量库 & 大文件
+*.bin
+*.pth
+*.pt
+*.ckpt
+*.index
+*.h5
+*.parquet
+*.zip
+*.rar
+*.gz
+*.tar
+faiss/
+chroma/
+milvus/
+models/
+model/
+embedding/
+reranker/
+output/
+
+# 数据集 & 文档
+*.pdf
+*.json
+*.jsonl
+*.docx
+*.csv
+*.xlsx
+data/
+dataset/
+docs/
+files/
+
+# 日志 & 缓存
+logs/
+log/
+*.log
+tmp/
+temp/

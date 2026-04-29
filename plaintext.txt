@@ -1,0 +1,92 @@
+financial_rag_agent/
+├── configs/                    # 配置中心 V
+│   ├── __init__.py
+│   ├── model_config.py
+│   └── rag_config.py
+│
+├── data/                       # 数据（PDF + 向量库）
+│   ├── raw_pdfs/
+│   └── vector_store/
+│
+├── common/                     # 新增：公共工具、日志、异常
+│   ├── __init__.py
+│   ├── utils.py
+│   ├── logger.py
+│   └── exceptions.py
+│
+├── rag/                        # RAG核心（基于DeepDoc）
+│   ├── __init__.py
+│   ├── document_loaders/
+│   │   └── ocr_base_loader/    ############################### 待开发##################################
+│   │   │   ├── core/                  # 核心引擎
+│   │   │   │   ├── ocr_engine.py       # 文本检测 + 识别（复用你给的代码）
+│   │   │   │   ├── layout_engine.py    # 版面分析（标题/表格/图片分类）
+│   │   │   │   └── base_recognizer.py  # 通用 ONNX 推理基类
+│   │   │   ├── parser/
+│   │   │   │   ├── pdf_processor.py    # PDF 渲染 + 文本提取
+│   │   │   │   └── struct_builder.py   # 结构化输出（markdown/json）
+│   │   │   ├── schema.py             # 统一数据结构
+│   │   │   ├── models/                 # 存放 ONNX 模型（InfiniFlow/deepdoc）
+│   │   │   └── ocr_pdf_loader.py           # 对外统一接口
+                                #########################################################################
+│   │   └── pymupdf_texttable_loader.py   # 最经典的pymupdf读法
+│   ├── text_splitters/
+│   │   └── md_splitter.py
+│   ├── embeddings/             # 转成向量
+│   │   └── embed_model.py
+│   │   └── vector_store.py
+│   ├── retrievers/             # 召回
+│   │   ├── vector_retriever.py
+│   │   ├── bm25_retriever.py
+│   │   ├── reranker.py
+│   │   └── hybrid_retriever.py # ★ 混合检索（金融必备）
+│   └── meta/                    # ★ 元数据（公司/日期/页码/券商）
+│   │   └── meta_extract.py
+│   └── rag_pipline.py              # pdf->向量数据库全流程
+│
+├── agent/                      # Agent大脑（LangChain + LangGraph）
+│   ├── __init__.py
+│   ├── llm/
+│   │   └── base_llm.py
+│   ├── tools/
+│   │   └── rag_tool.py
+│   │   └── structured_rag_tool.py
+│   ├── memory/
+│   │   └── chat_history.py
+│   ├── prompt/                  # ★ 金融专用Prompt
+│   │   ├── system_prompt.py
+│   │   ├── rag_prompt.py
+│   │   └── agent_prompt.py
+│   ├── state/                   # 改进版本
+│   │   └── agent_state.py
+│   ├── nodes/
+│   │   ├── route_node.py
+│   │   ├── rewrite_node.py
+│   │   ├── retrieve_node.py
+│   │   ├── judge_node.py
+│   │   ├── answer_node.py
+│   │   └── fallback_node.py
+│   ├── formatter/
+│   │   └── answer_formatter.py
+│   └── orchestrator.py
+│
+├── docker/                        # 接口服务
+│   ├── docker-compose.yml
+│   ├── backend/
+│   │   ├── api.py
+│   │   └── Dockerfile
+│   └── frontend/
+│       ├── src/App.vue
+│       ├── Dockerfile
+│       └── ...
+│
+│
+├── tests/
+│   ├── test_deepdoc.py
+│   └── test_agent_route.py
+│
+├── .gitignore
+├── .env
+├── requirements.txt
+├── README.md
+└── main.py

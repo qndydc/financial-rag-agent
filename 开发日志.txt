@@ -1,0 +1,226 @@
+基于langchain与ragflow的金融市场pdf年报分析项目
+Introduction
+在这里定义我的项目是什么，做一个简单的介绍：用于给金融分析使用的问答系统，自然语言回答，系统从几百份pdf中找相关段落，生成回答并标注文档来源和页码，然后agent实现多轮对话
+支持：
+
+📄 多 PDF 研报检索
+
+🧠 RAG + Agent 多轮对话
+
+🔍 Hybrid Retrieval（向量 + BM25 + Rerank）
+
+📌 可溯源回答（文档 + 页码）
+
+⚡ SSE 流式输出
+
+📊 RAGAS 自动评测
+
+🐳 Docker 一键部署
+零. 快速启动并试用我们的项目
+⚡ Quick Start（推荐）
+一键启动前后端
+docker compose -f docker/docker-compose.yml up --build
+🌐 访问地址
+服务	地址
+前端（Vue）	http://localhost:5173
+
+后端（FastAPI）	http://localhost:8000
+
+API 文档	http://localhost:8000/docs
+🛑 停止服务
+docker compose -f docker/docker-compose.yml down
+🔄 后台运行（可选）
+docker compose -f docker/docker-compose.yml up -d --build
+🧪 Development Mode（开发模式）
+
+适用于调试代码或二次开发。
+
+🔧 方式一：Docker 分开启动
+▶️ 启动后端
+docker build -t financial-rag-backend -f docker/backend/Dockerfile .
+
+docker run -p 8000:8000 \
+  --env-file .env \
+  financial-rag-backend
+▶️ 启动前端
+cd docker/frontend
+
+docker build -t financial-rag-frontend .
+
+docker run -p 5173:5173 financial-rag-frontend
+🧑‍💻 方式二：本地开发（推荐）
+▶️ 启动后端
+pip install -r requirements.txt
+
+uvicorn docker.backend.api:app \
+  --reload \
+  --host 0.0.0.0 \
+  --port 8000
+▶️ 启动前端
+cd docker/frontend
+
+npm install
+npm run dev
+📦 项目结构（Docker相关）
+docker/
+├── docker-compose.yml
+├── backend/
+│   ├── api.py
+│   └── Dockerfile
+└── frontend/
+    ├── Dockerfile
+    └── src/
+⚙️ 环境配置
+
+请先创建 .env 文件（参考示例）：
+
+OPENAI_API_KEY=your_api_key
+EMBEDDING_MODEL=your_embedding_model
+VECTOR_STORE_PATH=data/vector_store
+
+一. rag部分
+1.documentloader：
+    pymupdf：首先采用pymupdf直接切分，但效果欠佳，无法处理pdf文件中的双栏，表格等，原因是pdf中的排列顺序并非是读取顺序
+    的从左到右从上到下，而是以文本块的形式按块排序，因此去掉了所有的坐标排序，用'text'模式阅读。虽然换行、空格、
+    Windows转义符问题彻底解决，切分后chunk语义完整，但仍然存在多栏结构无法处理的问题，仍然需要更高级的处理方式
+    "PyMuPDF 直接 get_text() 不行！"
+
+    pymupdf_pdfplumber：改变了之前全页按y分组，全行按x分组的布局，实现了“PyMuPDF 提正文 + pdfplumber 提表格”的分工解析，
+    并通过表格区域去重避免正文与表格内容重复。同时，它优化了页面阅读顺序，加入了多栏检测、页眉页脚过滤和段落合并，
+    使金融研报中的复杂版面文本输出更接近真实阅读顺序且更适合后续 Markdown/RAG 处理。
+
+    deepdoc_loader：采用多模态ocr，将pdf转为图片然后用视觉模型读取
+                1. 分页渲染为图片（fitz.Page.get_pixmap）
+                2. 提取原生可复制文本块（PyMuPDF）
+                   ↓
+                【双路并行】
+                   ↓------------------------↓
+                A. OCR 全解析             B. 原生文本解析
+                (扫描PDF专用)             (可复制PDF专用)
+                   ↓                        ↓
+                文本检测 → 文本识别      提取块 + 坐标
+                版面分析（标题/表格）    版面分析
+                   ↓                        ↓
+                【结果融合】
+                置信度对比 → 坐标对齐 → 去重 → 阅读顺序排序
+                   ↓
+                【自动过滤】
+                页眉/页脚/页码/重复垃圾文本
+                   ↓
+                【结构化输出】
+                Markdown / JSON / 分段文本（带类型标签）
+
+        schemas：定义所有模块的数据输入输出格式。由TextBlock统一表示PyMuPDF原生块，OCR 识别块以及融合后的最终块
+        pdf_processor：负责生成“双路原始输入”。
+        base_recognizer：做 ONNX 推理的通用封装层。方便替换：检测模型，识别模型，版面模型
+        ocr_engine：核心视觉识别器 cpu版本，英文paddle会与torch冲突 
+                    det检测出框，rec识别文字，需要合理调试det分辨率，避免
+        layout_engine：轻量化版面理解
+        struct_builder：双路融合，去重，清洗，并输出markdown
+        pdf_loader：最终接口
+
+2.splitter：
+    chinese_splitter：中文切分器（RecursiveCharacterTextSplitter）根据切分优先级，从段落符号、标点符号等位置开始切分，
+    （段落，如果过长再用换行，再长再用句子）而非严格按照chunksize进行截断。此外，设置了chunk_overlap，当以句子切开甚至更小时，
+    overlap会使上下两个块重叠一定字符，长段落被切分导致语义不连接。最重要的，比起langchain的切分器本项目还加入了表格保护，
+    这是为金融领域专门设计的。当splitter遇到表格（|xxxxx|）时，会用一个占位符将其替换再切分，切完再将表格换回来。
+    这个splitter还升级了之前的单行表格处理，不再单行代替，而是将整个表格块一起替换，避免了表格从中间被分开。但这还涉及到一个问题，
+    当单张表本身长度超过 chunk_size 时，如何只在行边界安全拆表。？？？？？？？？？？？？？？？？？？？
+    缺点：这是一个纯文本处理器，text输入text输出，忽略掉了documentloader中加载的各种页面信息。
+
+3.embedding:
+    embed_model：采用本地部署的embedding模型"BAAI/bge-m3",支持8192长文本，轻量高效。并带有长度安全检查（防止超长文本报错）
+    以及批量读取功能（把 1000 段文本 → 每 16 条一组分批向量化，防止显存爆炸）。将chunk转化为向量。
+    vector_store：创建向量库，如果已有向量库，则保存至向量库。同时这里还写了加载向量库的函数，因为后续检索函数会被多次调用，
+    写进循环，而加载向量库只需要一次。这样写可以避免多次加载向量数据库。
+    rag_pipline: pdf->分块->向量库 全流程
+    由于后续召回均使用document文件作为输入，因此需要将ragpipline中的dict输出全部转换为document，并特别为bm25建一个doc数据库
+
+4.retrievers：
+    vector_retriever：继承LangChain标准VectorStoreRetriever，但设计了分数过滤，去除了低质量片段，防止传统直接topk召回垃圾（按照向量相似度召回，bi-encoder）
+    bm25_retriever：BM25 是关键词精准检索器，专门抓 “字面匹配” 的文本，是金融 RAG 必配的精准检索模块。（按照关键词频率去召回）
+    reranker：把粗召回的 10~20 条文本，用高精度模型重新打分，只留下最相关的 3~10 条给 LLM（再按 Markdown 结构切分，长句再滑窗切分）
+    向量检索是单向编码（biencoder），会将与问题看起来像但不相关的答案召回（crossencoder），而reranker是双向编码，真正理解 “问题 — 文档” 之间的关系
+    为了避免reranker模型输入上限的问题，将query和doc拆分成多个segments并组合成多组pair，reranker给每一个子pair打分，然后取最大值代表整个query+doc
+    hybrid_retriever：在这里实现了v，b，h三种召回方式的自由切换，以适配不同的环境。实现了三重降噪：向量分数阈值过滤 + Reranker 精排 + 最终条数截断。
+    由于是金融财报，对精准数据的需求很大，不能只靠语义召回，混合精度能最大程度上优化召回答案
+
+5.reranker 微调：
+   通用reranker模型在专业垂直领域能力下降。reranker模型本质上是encoder-only（类bert），在这里作二分类任务，输入[CLS] query [SEP] -> Encoder输出 → 取  token 向量 → 线性分类头 → 输出1维logit分数
+   generate_reranker_data：收集(query，正确chunk，难负例)三元组数据训练reranker，人工标注一条正例，然后用分数最高但无关的做负例
+   train_reranker：使用三元组训练数据（query + 正例文档 + 负例文档）做二分类微调，让模型学会给相关文档打高分、不相关文档打低分
+   ，通过BCEWithLogitsLoss = 二分类交叉熵损失，不断让score（query+posi）> score（query+nega），提升 RAG 系统的精排准确率
+   
+
+实验记录
+chunk_size = 512 简单问题
+召回方式          Recall@3  Recall@5  Recall@10  
+纯向量            0.6551    0.6551    0.6551
+纯BM25            0.0145    0.0145    0.0145 
+hybrid 6:4        0.8442    0.8551    0.8551
+
+chunk_size = 256 简单问题
+召回方式          Recall@3  Recall@5  Recall@10  
+纯向量            0.3225    0.4376    0.6192
+纯BM25            0.0284    0.0366    0.0574    
+hybrid 6:4        0.4737    0.6215    0.9426
+
+chunk_size = 256 复杂问题
+召回方式          Recall@3  Recall@5  Recall@10  
+纯向量            0.5163    0.6773    0.8125
+纯BM25            0.0474    0.0917    0.1227    
+hybrid 6:4        0.2898    0.6263    0.8526
+
+简单问题         Recall@10  precision@10   
+reranker        0.8586      0.3206
+FTreranker      0.8937      0.3341
+
+复杂问题         Recall@10  precision@10   
+reranker         0.8612       0.3762
+FTreranker       0.8821        0.4
+
+RAGAS实验测评
+混合检索使Recall@10 达 94%，MRR 提升 21%，复杂问题召回率提升23%；模型微调后答案忠实度92%，
+幻觉率下降65%，复杂问题解决率从62%升至86%；
+
+二. Agent部分 v0.1
+   0.Agent框架：DAG
+                     |<--------  retry  --------|
+   load_his -> route |-> rewrite -> retrieve -> |judge
+      +              |----------  chat  ------->|->ans      |--> save_his
+    query            |-------- bad query -------|->fallback |
+
+   1.orchestrator：核心。LangGraph 状态机，管理 LLM 推理 → 工具调用 → 循环的完整流程 (流程控制器，控制上一个节点跑完之后下一个跑谁)
+
+   2.llm：LLM 工厂，根据 model_config.LLM_MODE 返回 ChatOpenAI 实例，统一入口
+
+   3.tool：目前只有rag_tool，负责将rag的search() 包装成 LangChain @tool，LLM 可以通过 function-calling 调用它
+
+   4.chat_history：多会话历史管理，按 session_id 隔离，滑动窗口防止 token 超限。
+   整个项目的记忆功能由多方面共同完成，（1）query改写中注入历史提问，但不注入历史答案，然后由llm判断后续问题是否需要注入历史
+   比起传统的直接注入所有历史信息而言更加节省token（2）如果需要历史信息，再将历史回答与chunk结合，注入prompt （3）即使需要注入，
+   也不会将所有信息全部注入，而是用最长公共字符串相似度的方法，选取最相关的一条历史注入 （4）目前的记忆功能仍是短期历史，不涉及到
+   向量库的构建和历史信息的保留，会在后续更新
+
+   5.node: node返回的参数必须在state中定义
+      fallback_node: 无法返回doc时fallback ——> 额外判断检索返回的doc是否真的相关，用户问的问题是否会超过知识库限度，真正的失败控制
+
+      judge_node：在检索和answer中加了一层judge，用于判断召回的文档是否好，top1分数是否够高，来源是否相关，真正的质量控制（重写或fb）
+
+      route_node：决定是否使用rag召回文档，一般的日常问题就不用召回了
+
+      rewrite_node：轻量化rewrite，尽量减少token消耗。由全部历史送进llm，交给llm重写问题筛选历史 -> 只送历史问题，让llm判断问题类型
+                     在rewrite这里用llm处理复杂问题，将复杂问题拆分为简单子问题，可以避免retriever对于复杂问题召回率低的问题。轻量化
+                     retriever，但是增加了llm调用次数。
+
+      retrieval_node：多路召回，根据改写问我呢提是否有子问题来决定是否进行多路召回。每一路的子问题都经过h+r，全部合并并去重
+
+   7.DAG流程：固定节点，分支，以业务流程编排为核心。因为金融领域答案确定性高，流程清晰，不涉及到LLM反复思考决策逻辑
+
+      
+
+三. 前后端
+   1.FastAPI：使用fastapi完成前后端的信息传输，在后端建立sse流式输出，在内部网址 http://0.0.0.0:8000 中即可查看后端页面，可以在这里定义输入，查看输出
+
+
+
