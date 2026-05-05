@@ -28,6 +28,7 @@ models/
 model/
 output/
 reranker_trainer/
+bm25_*.pkl
 
 # 数据集 & 文档
 *.pdf
