@@ -44,9 +44,9 @@ class BM25Retriever(BaseRetriever):
 # ==========================
 # 保存 / 加载
 # ==========================
-def save_bm25(bm25, docs, path=BM25_INDEX_PATH):
+def save_bm25(bm25, documents, path=BM25_INDEX_PATH):
     with open(path, "wb") as f:
-        pickle.dump({"bm25": bm25, "docs": docs}, f)
+        pickle.dump({"bm25": bm25, "documents": documents}, f)
 
 def load_bm25(path=BM25_INDEX_PATH):
     with open(path, "rb") as f:

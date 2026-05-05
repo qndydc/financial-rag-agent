@@ -255,6 +255,9 @@ class FinancialRAGAgent:
             node_name = list(event.keys())[0]
             data = event[node_name]
 
+            if data is None:
+                continue
+
             # 1. 流式输出答案
             if "answer" in data and data["answer"]:
                 yield {

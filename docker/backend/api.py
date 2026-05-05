@@ -15,7 +15,7 @@ sys.path.append(str(Path(__file__).parent.parent.parent))  # 将上级目录加�
 from agent.orchestrator import FinancialRAGAgent
 
 # ======================================
-# 1. 初始化 FastAPI app（必须叫 app）
+# 1. 初始化 FastAPI app
 # ======================================
 app = FastAPI(title="金融 RAG Agent API", version="1.0")
 
@@ -29,7 +29,7 @@ app.add_middleware(
 )
 
 # ======================================
-# 2. 全局初始化 Agent（只加载1次）
+# 2. 全局初始化 Agent
 # ======================================
 print("[API] 正在初始化 RAG Agent...")
 agent = FinancialRAGAgent()
@@ -54,17 +54,19 @@ async def chat(request: ChatRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 # ======================================
-# 5. 🔥 SSE 流式对话接口（给 Vue 用）
+# 5. 🔥 SSE 流式对话接口
 # ======================================
 @app.post("/api/stream/chat")
 async def stream_chat(request: ChatRequest):
     try:
         async def event_generator():
-            # 流式调用 LangGraph
             async for chunk in agent.stream_chat(
                 request.query,
                 session_id=request.session_id
             ):
+                # ✅ 必须加这两行，过滤 None，防止崩溃
+                if chunk is None:
+                    continue
                 yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
 
         return EventSourceResponse(event_generator())
@@ -85,7 +87,6 @@ async def clear_history(request: ChatRequest):
 # ======================================
 if __name__ == "__main__":
     import uvicorn
-    # 重点：写 api:app  不是 main:app！
     uvicorn.run(
         "api:app",
         host="0.0.0.0",

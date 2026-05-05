@@ -78,7 +78,7 @@ def build_answer_node(history_manager):
         intent = state.get("intent", "rag_qa")
         session_id = state.get("session_id", "")
         docs = state.get("retrieved_docs", [])
-        citations = state.get("citations", [])
+        citations = state.get("citations") or []
         rewritten_query = state.get("rewritten_query", "")
         structured_query = state.get("structured_query", {}) or {}
 
