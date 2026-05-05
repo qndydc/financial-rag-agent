@@ -26,9 +26,8 @@ chroma/
 milvus/
 models/
 model/
-embedding/
-reranker/
 output/
+reranker_trainer/
 
 # 数据集 & 文档
 *.pdf
@@ -41,7 +40,7 @@ data/
 dataset/
 docs/
 files/
-
+git push -f origin main
 # 日志 & 缓存
 logs/
 log/
