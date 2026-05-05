@@ -2,31 +2,7 @@ import re
 from langchain_core.documents import Document
 from typing import List
 from langchain_classic.retrievers import EnsembleRetriever
-'''
-# 手写极简 EnsembleRetriever（不依赖任何库）
-class EnsembleRetriever:
-    def __init__(self, retrievers, weights=None):
-        self.retrievers = retrievers
-        self.weights = weights or [1.0] * len(retrievers)
 
-    def invoke(self, query: str):
-        results = []
-
-        for retriever, w in zip(self.retrievers, self.weights):
-            docs = retriever.invoke(query)
-            for doc in docs:
-                doc.metadata["score"] = doc.metadata.get("score", 0) + w
-                results.append(doc)
-
-        # 去重 + 排序
-        unique = {}
-        for d in results:
-            key = d.page_content
-            if key not in unique or unique[key].metadata["score"] < d.metadata["score"]:
-                unique[key] = d
-
-        return sorted(unique.values(), key=lambda d: d.metadata["score"], reverse=True)
-'''
 # ------------------------------------------------------------------------------
 # ✅ 关键优化：只导入类型，不初始化模型
 # ------------------------------------------------------------------------------
@@ -57,7 +33,7 @@ HYBRID_SEARCH_WEIGHT_VECTOR = rag_config.HYBRID_SEARCH_WEIGHT_VECTOR
 HYBRID_SEARCH_WEIGHT_BM25 = rag_config.HYBRID_SEARCH_WEIGHT_BM25
 
 # ------------------------------------------------------------------------------
-# ✅ 终极优化：懒加载检索器 + 懒加载重排模型
+# 懒加载检索器 + 懒加载重排模型
 # ------------------------------------------------------------------------------
 def create_hybrid_retriever(
     vectorstore,
@@ -75,7 +51,7 @@ def create_hybrid_retriever(
     print("hybrid初始化完成")
 
     # ====================== ✅ 核心懒加载 ======================
-    # reranker 只在第一次真正检索时才加载！！！
+    # reranker 只在第一次真正检索时才加载
     # ==========================================================
     reranker = None
 
