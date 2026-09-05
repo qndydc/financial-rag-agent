@@ -4,6 +4,7 @@ from typing import Dict, List, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from agent.call_lifecycle import call_lifecycle
 from agent.state.agent_state import AgentState
 from agent.llm.base_llm import get_llm
 
@@ -154,13 +155,36 @@ def build_answer_node(history_manager):
                 ),
             ]
 
-        response = llm.invoke(messages)
+        outcome = call_lifecycle.execute(
+            "llm.answer",
+            lambda messages: llm.invoke(messages),
+            {"messages": messages},
+            argument_retryable=False,
+            empty_retryable=False,
+            is_empty=lambda response: not str(getattr(response, "content", "") or "").strip(),
+        )
+        observation = outcome.observation.model_dump()
+        if outcome.value is None or observation.get("error_type"):
+            return {
+                "last_observation": observation,
+                "observations": [observation],
+                "debug_info": {
+                    **state.get("debug_info", {}),
+                    "answer_error": observation["result"],
+                },
+            }
+
+        response = outcome.value
         answer_text = getattr(response, "content", str(response)).strip()
 
         if intent != "chat" and "来源" not in answer_text:
             answer_text = answer_text.rstrip() + "\n\n来源：\n" + _format_sources(citations)
 
-        return {"answer": answer_text}
+        return {
+            "answer": answer_text,
+            "last_observation": observation,
+            "observations": [observation],
+        }
 
     return answer_node
 

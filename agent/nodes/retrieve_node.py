@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 from typing import Dict, List, Any
 
+from agent.call_lifecycle import call_lifecycle
 from agent.state.agent_state import AgentState
+from configs import model_config
 
 
 def build_retrieve_node(rag_adapter, structured_rag_adapter):
@@ -22,16 +24,70 @@ def build_retrieve_node(rag_adapter, structured_rag_adapter):
         structured_query = state.get("structured_query", {})
         state_rewritten_query = state.get("rewritten_query", "")
         user_input = state["user_input"]
+        task_type = structured_query.get("task_type", "")
 
         # 定义一个简单状态，简单状态直接普通查询，复杂状态走结构化查询
-        if structured_query.get("task_type") != "fact":  # 如果不是普通查询，就走结构化检索
-            result = structured_rag_adapter.search(structured_query)
+        if task_type != "fact":  # 如果不是普通查询，就走结构化检索
+            def invoke_search(structured_query, mode, use_reranker):
+                return structured_rag_adapter.search(
+                    structured_query,
+                    mode=mode,
+                    use_reranker=use_reranker,
+                )
+
+            outcome = call_lifecycle.execute(
+                "structured_rag_search",
+                invoke_search,
+                {
+                    "structured_query": structured_query,
+                    "mode": "hybrid",
+                    "use_reranker": True,
+                },
+                argument_retryable=(
+                    state.get("argument_repair_count", 0)
+                    < state.get("argument_repair_limit", model_config.ARGUMENT_REPAIR_LIMIT)
+                ),
+                empty_retryable=(
+                    state.get("generalization_count", 0)
+                    < state.get("generalization_limit", model_config.EMPTY_RESULT_RETRY_LIMIT)
+                ),
+                is_empty=lambda value: not value or not value.get("docs", []),
+                summarize=lambda value: {"doc_count": len((value or {}).get("docs", []))},
+            )
             print(f"[retrieve_node] 使用结构化检索，structured_query = {structured_query}")
         else:
             query = state_rewritten_query or user_input
-            result = rag_adapter.search(query)
+
+            def invoke_search(query, mode, use_reranker):
+                return rag_adapter.search(
+                    query,
+                    mode=mode,
+                    use_reranker=use_reranker,
+                )
+
+            outcome = call_lifecycle.execute(
+                "rag_search",
+                invoke_search,
+                {
+                    "query": query,
+                    "mode": "hybrid",
+                    "use_reranker": True,
+                },
+                argument_retryable=(
+                    state.get("argument_repair_count", 0)
+                    < state.get("argument_repair_limit", model_config.ARGUMENT_REPAIR_LIMIT)
+                ),
+                empty_retryable=(
+                    state.get("generalization_count", 0)
+                    < state.get("generalization_limit", model_config.EMPTY_RESULT_RETRY_LIMIT)
+                ),
+                is_empty=lambda value: not value or not value.get("docs", []),
+                summarize=lambda value: {"doc_count": len((value or {}).get("docs", []))},
+            )
             print(f"[retrieve_node] 使用普通检索，query = {query}")
 
+        observation = outcome.observation.model_dump()
+        result = outcome.value or {}
         docs = result.get("docs", [])
         meta = result.get("meta", {})
 
@@ -39,7 +95,6 @@ def build_retrieve_node(rag_adapter, structured_rag_adapter):
 
         # 便于调试：记录本轮实际执行了哪些子查询
         sub_queries = structured_query.get("sub_queries", [])
-        task_type = structured_query.get("task_type", "")
         structured_rewritten_query = structured_query.get("rewritten_query", "")
         filters = structured_query.get("filters", {})
         exclude_terms = structured_query.get("exclude_terms", [])
@@ -63,6 +118,8 @@ def build_retrieve_node(rag_adapter, structured_rag_adapter):
         return {
             "retrieved_docs": docs,
             "citations": citations,
+            "last_observation": observation,
+            "observations": [observation],
             "debug_info": {
                 **state.get("debug_info", {}),
                 "retrieved_count": len(docs),

@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import operator
 from typing import Annotated, Any, Dict, List, Optional, Sequence
 from typing_extensions import TypedDict
 
@@ -37,9 +38,16 @@ class AgentState(TypedDict, total=False):
     retrieval_success: bool
     fallback_reason: str
 
-    # 重试控制 NEW
-    retry_count: int
-    max_retries: int
+    # 分类恢复预算：临时错误由 call_lifecycle 在单次调用内处理
+    argument_repair_count: int
+    generalization_count: int
+    argument_repair_limit: int
+    generalization_limit: int
+
+    # 调用生命周期记录
+    observations: Annotated[List[Dict[str, Any]], operator.add]
+    last_observation: Dict[str, Any]
+    recovery_action: str
 
     # 最终输出
     answer: str

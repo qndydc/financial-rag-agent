@@ -59,5 +59,18 @@ class ModelConfig:
     GENERATION_MAX_TOKENS = 2048
     GENERATION_TOP_P = 0.9
 
+    # ---------------------------
+    # 调用生命周期控制
+    # ---------------------------
+    LLM_CALL_TIMEOUT_SECONDS = float(os.getenv("LLM_CALL_TIMEOUT_SECONDS", "30"))
+    TOOL_CALL_TIMEOUT_SECONDS = float(os.getenv("TOOL_CALL_TIMEOUT_SECONDS", "45"))
+    CALL_MAX_ATTEMPTS = int(os.getenv("CALL_MAX_ATTEMPTS", "3"))
+    CALL_BACKOFF_BASE_SECONDS = float(os.getenv("CALL_BACKOFF_BASE_SECONDS", "0.5"))
+    CALL_BACKOFF_MAX_SECONDS = float(os.getenv("CALL_BACKOFF_MAX_SECONDS", "4"))
+    CALL_MAX_CONCURRENCY = int(os.getenv("CALL_MAX_CONCURRENCY", "4"))
+    ARGUMENT_REPAIR_LIMIT = int(os.getenv("ARGUMENT_REPAIR_LIMIT", "1"))
+    EMPTY_RESULT_RETRY_LIMIT = int(os.getenv("EMPTY_RESULT_RETRY_LIMIT", "1"))
+    MAX_USER_QUERY_LENGTH = int(os.getenv("MAX_USER_QUERY_LENGTH", "2000"))
+
 
 model_config = ModelConfig()

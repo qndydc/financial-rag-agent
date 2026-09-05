@@ -16,8 +16,8 @@ Graph 结构：
    │    └──────────────→ answer   (chat)
    │
    └→ rewrite → retrieve → judge
-                           ├─ answer
-                           ├─ rewrite (retry)
+          ↑                ├─ answer
+          └── recovery ────┤
                            └─ fallback
       ↓
   save_history
@@ -27,7 +27,7 @@ Graph 结构：
 import json
 import sys
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 sys.path.append(str(Path(__file__).parent.parent))
 
@@ -35,7 +35,7 @@ from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage, AIMessage
 from langgraph.graph import StateGraph, END
 
-from configs import rag_config
+from configs import model_config, rag_config
 from rag import load_vector_store, create_hybrid_retriever
 
 from agent.state.agent_state import AgentState
@@ -44,9 +44,10 @@ from agent.tools.rag_tool import create_rag_search_adapter
 from agent.tools.structured_rag_tool import create_structured_rag_search_adapter
 from agent.memory.chat_history import ChatHistoryManager
 
-from agent.nodes.rewrite_node import rewrite_node, increment_retry_node
+from agent.nodes.rewrite_node import rewrite_node
 from agent.nodes.retrieve_node import build_retrieve_node
 from agent.nodes.answer_node import build_answer_node
+from agent.nodes.recovery_node import recovery_node
 from agent.nodes.route_node import route_node
 from agent.nodes.judge_node import judge_node
 from agent.nodes.fallback_node import fallback_node
@@ -64,7 +65,7 @@ class FinancialRAGAgent:
         vector_store_path: str = None,
         all_docs_json_path: str = None,
         max_turns: int = 10,
-        max_retries: int = 1,
+        max_retries: Optional[int] = None,
     ):
         vs_path = vector_store_path or rag_config.VECTOR_STORE_DIR
         docs_path = all_docs_json_path or f"{rag_config.VECTOR_STORE_DIR}/all_documents.json"
@@ -87,7 +88,11 @@ class FinancialRAGAgent:
 
         # 4. 默认 LLM（节点内也可直接 get_llm）
         self.llm = get_llm()
-        self.max_retries = max_retries
+        self.max_retries = (
+            model_config.EMPTY_RESULT_RETRY_LIMIT
+            if max_retries is None
+            else max(0, max_retries)
+        )
 
         # 5. 构建图
         self.graph = self._build_graph()
@@ -112,8 +117,8 @@ class FinancialRAGAgent:
             return {
                 "chat_history": history,
                 "messages": messages,
-                "retry_count": state.get("retry_count", 0),
-                "max_retries": state.get("max_retries", self.max_retries),
+                "argument_repair_count": state.get("argument_repair_count", 0),
+                "generalization_count": state.get("generalization_count", 0),
                 "debug_info": {
                     **state.get("debug_info", {}),
                     "history_count": len(history),
@@ -144,10 +149,10 @@ class FinancialRAGAgent:
         workflow.add_node("load_history", load_history_node)
         workflow.add_node("route", route_node)
         workflow.add_node("rewrite", rewrite_node)
-        workflow.add_node("increment_retry", increment_retry_node)
         workflow.add_node("retrieve", retrieve_node)
         workflow.add_node("judge", judge_node)
         workflow.add_node("ans", answer_node)
+        workflow.add_node("recovery", recovery_node)
         workflow.add_node("fallback", fallback_node)
         workflow.add_node("save_history", save_history_node)
 
@@ -169,20 +174,40 @@ class FinancialRAGAgent:
             }
         )
 
-        workflow.add_edge("rewrite", "retrieve")
+        workflow.add_conditional_edges(
+            "rewrite",
+            self._route_after_rewrite,
+            {
+                "retrieve": "retrieve",
+                "recovery": "recovery",
+            },
+        )
         workflow.add_edge("retrieve", "judge")
         workflow.add_conditional_edges(
             "judge",
-            self._route_after_judge,  # 根据 judge_node 的输出 retrieval_success 和 retry_count 决定下一步走向，
-            {                         # 成功直接答，失败且未超重试次数走 rewrite 重试，失败且超重试次数走 fallback
+            self._route_after_judge,
+            {
                 "ans": "ans",
-                "rewrite": "increment_retry",
-                "fallback": "fallback",
+                "recovery": "recovery",
             }
         )
 
-        workflow.add_edge("increment_retry", "rewrite")
-        workflow.add_edge("ans", "save_history")
+        workflow.add_conditional_edges(
+            "ans",
+            self._route_after_answer,
+            {
+                "save_history": "save_history",
+                "recovery": "recovery",
+            },
+        )
+        workflow.add_conditional_edges(
+            "recovery",
+            self._route_after_recovery,
+            {
+                "retrieve": "retrieve",
+                "fallback": "fallback",
+            },
+        )
         workflow.add_edge("fallback", "save_history")
         workflow.add_edge("save_history", END)
 
@@ -191,24 +216,35 @@ class FinancialRAGAgent:
     def _route_after_route(self, state: AgentState) -> str:
         return state.get("intent", "rag_qa")
 
-    def _route_after_judge(self, state: AgentState) -> str:
-        retreival_success = state.get("retrieval_success", False)
-        retry_count = state.get("retry_count", 0)
-        max_retries = state.get("max_retries", self.max_retries)
+    def _route_after_rewrite(self, state: AgentState) -> str:
+        observation = state.get("last_observation", {}) or {}
+        if state.get("structured_query") and observation.get("status") != "failed":
+            return "retrieve"
+        return "recovery"
 
-        if retreival_success:
+    def _route_after_judge(self, state: AgentState) -> str:
+        if state.get("retrieval_success", False):
             return "ans"
-        if retry_count < max_retries:
-            return "rewrite"
-        return "fallback"
+        return "recovery"
+
+    @staticmethod
+    def _route_after_answer(state: AgentState) -> str:
+        return "save_history" if state.get("answer", "").strip() else "recovery"
+
+    @staticmethod
+    def _route_after_recovery(state: AgentState) -> str:
+        return state.get("recovery_action", "fallback")
 
     def chat(self, user_input: str, session_id: str = "default") -> str:
         result = self.graph.invoke(
             {
                 "user_input": user_input,
                 "session_id": session_id,
-                "retry_count": 0,
-                "max_retries": self.max_retries,
+                "argument_repair_count": 0,
+                "generalization_count": 0,
+                "argument_repair_limit": model_config.ARGUMENT_REPAIR_LIMIT,
+                "generalization_limit": self.max_retries,
+                "observations": [],
                 "debug_info": {},
             }
         )
@@ -248,8 +284,11 @@ class FinancialRAGAgent:
         async for event in self.graph.astream({
             "user_input": user_input,
             "session_id": session_id,
-            "retry_count": 0,
-            "max_retries": self.max_retries,
+            "argument_repair_count": 0,
+            "generalization_count": 0,
+            "argument_repair_limit": model_config.ARGUMENT_REPAIR_LIMIT,
+            "generalization_limit": self.max_retries,
+            "observations": [],
             "debug_info": {},
         }):
             node_name = list(event.keys())[0]
@@ -289,14 +328,17 @@ class FinancialRAGAgent:
         - answer: 最终答案
         - contexts: 检索到的 chunk 文本列表
         - context_docs: 原始 Document 列表
-        - intent / rewritten_query / retrieval_success / debug_info: 调试字段
+        - intent / rewritten_query / retrieval_success / observations / debug_info: 调试字段
         """
         result = self.graph.invoke(
             {
                 "user_input": user_input,
                 "session_id": session_id,
-                "retry_count": 0,
-                "max_retries": self.max_retries,
+                "argument_repair_count": 0,
+                "generalization_count": 0,
+                "argument_repair_limit": model_config.ARGUMENT_REPAIR_LIMIT,
+                "generalization_limit": self.max_retries,
+                "observations": [],
                 "debug_info": {},
             }
         )
@@ -310,6 +352,7 @@ class FinancialRAGAgent:
             "intent": result.get("intent"),
             "rewritten_query": result.get("rewritten_query"),
             "retrieval_success": result.get("retrieval_success"),
+            "observations": result.get("observations", []),
             "debug_info": result.get("debug_info", {}),
         }
 

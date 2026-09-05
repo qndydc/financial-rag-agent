@@ -11,7 +11,7 @@ sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from agent.state.agent_state import AgentState
 from agent.llm.base_llm import get_llm
-from agent.schema.structured_query import StructuredQuery
+from agent.call_lifecycle import call_lifecycle, validate_structured_query
 
 
 QUERY_REWRITE_SYSTEM_PROMPT = """
@@ -50,7 +50,6 @@ __user_input__
 def rewrite_node(state: AgentState) -> Dict:
     user_input = (state.get("user_input") or "").strip()
     history = state.get("chat_history", [])
-    retry_count = state.get("retry_count", 0)
 
     if not user_input:
         print("[rewrite_node] 用户输入为空，跳过改写")
@@ -65,22 +64,7 @@ def rewrite_node(state: AgentState) -> Dict:
             rewrite_mode="empty",
         )
 
-    # 1) retry 后不再调用 LLM，直接走规则或原问
-    if retry_count > 0:
-        print("[rewrite_node] 重试，使用规则改写")
-        rewritten_query = _simple_rewrite(user_input, history)
-        return _build_result(
-            user_input=user_input,
-            rewritten_query=rewritten_query,
-            sub_queries=[rewritten_query] if rewritten_query else [user_input],
-            task_type="fact",
-            filters={},
-            use_history=(rewritten_query != user_input),
-            debug_info=state.get("debug_info", {}),
-            rewrite_mode="retry_rule",
-        )
-
-    # 2) 简单问题：直接通过
+    # 1) 简单问题：直接通过，不产生模型调用 observation
     if not _need_any_rewrite(user_input, history):
         print("[rewrite_node] 问题简单，直接通过")
         return _build_result(
@@ -109,59 +93,78 @@ def rewrite_node(state: AgentState) -> Dict:
             rewrite_mode="rule",
         )
     '''
-    # 4) 真正复杂问题：首次才调用 LLM
+    # 2) 复杂问题：通过统一生命周期调用 LLM
     history_text = _format_history_for_rewrite(history)
     print(f"[rewrite_node] 调用 LLM 进行改写，历史文本: {history_text}")
-    try:
-        llm = get_llm()
-        messages = [
-            SystemMessage(content=QUERY_REWRITE_SYSTEM_PROMPT),
-            HumanMessage(
-                content=QUERY_REWRITE_USER_PROMPT
-                .replace("__history_text__", history_text)
-                .replace("__user_input__", user_input)
-            ),
-        ]
+    llm = get_llm()
+    messages = [
+        SystemMessage(content=QUERY_REWRITE_SYSTEM_PROMPT),
+        HumanMessage(
+            content=QUERY_REWRITE_USER_PROMPT
+            .replace("__history_text__", history_text)
+            .replace("__user_input__", user_input)
+        ),
+    ]
 
+    def invoke_and_validate(messages):
         response = llm.invoke(messages)
         text = getattr(response, "content", str(response)).strip()
-        parsed = _safe_parse_json(text)
+        return parse_structured_query_response(text, user_input)
 
-        parsed["original_query"] = user_input
-        parsed.setdefault("task_type", "fact")
-        parsed.setdefault("rewritten_query", user_input)
-        parsed.setdefault("sub_queries", [parsed["rewritten_query"]])
-        parsed.setdefault("filters", {})
-        parsed.setdefault("use_history", False)
+    outcome = call_lifecycle.execute(
+        "llm.query_rewrite",
+        invoke_and_validate,
+        {"messages": messages},
+        argument_retryable=(
+            state.get("argument_repair_count", 0)
+            < state.get("argument_repair_limit", 1)
+        ),
+        is_empty=lambda value: not value,
+    )
+    observation = outcome.observation.model_dump()
 
-        sq = StructuredQuery(**parsed)
-
-        return _build_result(
-            user_input=user_input,
-            rewritten_query=sq.rewritten_query or user_input,
-            sub_queries=sq.sub_queries if sq.sub_queries else [user_input],
-            task_type=sq.task_type,
-            filters=sq.filters,
-            use_history=sq.use_history,
-            debug_info=state.get("debug_info", {}),
-            rewrite_mode="llm",
-        )
-
-    except Exception as e:
-        rewritten_query = _simple_rewrite(user_input, history)
-        return _build_result(
-            user_input=user_input,
-            rewritten_query=rewritten_query,
-            sub_queries=[rewritten_query] if rewritten_query else [user_input],
-            task_type="fact",
-            filters={},
-            use_history=(rewritten_query != user_input),
-            debug_info={
+    if outcome.value is None:
+        return {
+            "last_observation": observation,
+            "observations": [observation],
+            "debug_info": {
                 **state.get("debug_info", {}),
-                "rewrite_error": str(e),
+                "rewrite_mode": "llm_failed",
+                "rewrite_error": observation["result"],
             },
-            rewrite_mode="llm_fallback",
-        )
+        }
+
+    result = build_query_state(
+        outcome.value,
+        debug_info=state.get("debug_info", {}),
+        rewrite_mode="llm",
+    )
+    result.update({
+        "last_observation": observation,
+        "observations": [observation],
+    })
+    return result
+
+
+def parse_structured_query_response(text: str, user_input: str) -> Dict:
+    parsed = _safe_parse_json(text)
+    return validate_structured_query(parsed, original_query=user_input)
+
+
+def build_query_state(payload: Dict, debug_info: Dict, rewrite_mode: str) -> Dict:
+    return _build_result(
+        user_input=payload["original_query"],
+        rewritten_query=payload["rewritten_query"],
+        sub_queries=payload["sub_queries"],
+        task_type=payload["task_type"],
+        filters=payload["filters"],
+        use_history=payload["use_history"],
+        debug_info=debug_info,
+        rewrite_mode=rewrite_mode,
+        exclude_terms=payload.get("exclude_terms", []),
+        required_terms=payload.get("required_terms", []),
+        top_k=payload.get("top_k", 5),
+    )
 
 
 def _build_result(
@@ -173,6 +176,9 @@ def _build_result(
     use_history: bool,
     debug_info: Dict,
     rewrite_mode: str,
+    exclude_terms: List[str] = None,
+    required_terms: List[str] = None,
+    top_k: int = 5,
 ) -> Dict:
     structured_query = {
         "task_type": task_type,
@@ -181,6 +187,9 @@ def _build_result(
         "sub_queries": sub_queries,
         "filters": filters,
         "use_history": use_history,
+        "exclude_terms": exclude_terms or [],
+        "required_terms": required_terms or [],
+        "top_k": top_k,
     }
 
     return {
@@ -347,14 +356,3 @@ def _simple_rewrite(user_input: str, history: List) -> str:
         return f"{last_user_query} {user_input}".strip()
 
     return user_input
-
-
-def increment_retry_node(state: AgentState) -> Dict:
-    retry_count = state.get("retry_count", 0) + 1
-    return {
-        "retry_count": retry_count,
-        "debug_info": {
-            **state.get("debug_info", {}),
-            "retry_count": retry_count,
-        }
-    }
