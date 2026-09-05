@@ -121,10 +121,25 @@ python scripts/build_vector_store.py
 ---
 
 ## 📊 RAGAS 评测
+安装依赖并在 `.env` 中配置 `OPENAI_API_KEY`、`OPENAI_BASE_URL` 和
+`LLM_MODEL_NAME`。评测用例位于 `agent/test/testset.jsonl`，每行至少包含
+`query` 和 `reference`。
+
 运行自动化评测：
 ```bash
-python scripts/run_eval.py
+python -m agent.test.run_ragas_eval
 ```
+
+评测过程分为两步：先让 `FinancialRAGAgent.eval_chat()` 为每个问题生成
+`response` 和 `retrieved_contexts`，再由独立的评判模型计算以下指标：
+
+- `faithfulness`：回答中的事实能否由检索上下文支持。
+- `response_relevancy`：回答是否切中问题。
+- `context_recall`：检索上下文是否覆盖参考答案中的信息。
+- `factual_correctness`：生成回答与参考答案的事实是否一致。
+
+`hallucination_rate_proxy = 1 - faithfulness` 只是由忠实度推导出的代理指标，
+不是单独标注得到的真实幻觉率。比较不同版本时，应使用同一测试集、评判模型和参数。
 
 ### 输出路径
 ```

@@ -37,6 +37,9 @@ bm25_*.pkl
 *.docx
 *.csv
 *.xlsx
+!agent/test/testset.jsonl
+!evaluation/reports/*.json
+!evaluation/reports/*.csv
 data/
 dataset/
 docs/
