@@ -39,7 +39,9 @@ from configs import model_config, rag_config
 from rag import load_vector_store, create_hybrid_retriever
 
 from agent.state.agent_state import AgentState
+from agent.call_lifecycle import call_lifecycle
 from agent.llm.base_llm import get_llm
+from agent.tools.atomic_tools import FinancialAtomicTools
 from agent.tools.rag_tool import create_rag_search_adapter
 from agent.tools.structured_rag_tool import create_structured_rag_search_adapter
 from agent.memory.chat_history import ChatHistoryManager
@@ -82,6 +84,13 @@ class FinancialRAGAgent:
         # 2. 创建 RAG Adapter
         self.rag_adapter = create_rag_search_adapter(self.search_fn)  # 将底层search函数封装成python接口
         self.structured_rag_adapter = create_structured_rag_search_adapter(self.search_fn)  # 为结构化检索创建独立的适配器
+        self.atomic_tools = FinancialAtomicTools(
+            self.rag_adapter,
+            self.structured_rag_adapter,
+            all_documents,
+        )
+        for tool_name, handler in self.atomic_tools.handlers().items():
+            call_lifecycle.register_handler(tool_name, handler)
 
         # 3. 对话历史
         self.memory = ChatHistoryManager(max_turns=max_turns)
@@ -142,7 +151,7 @@ class FinancialRAGAgent:
             return {}
 
         # --- other node ---
-        retrieve_node = build_retrieve_node(self.rag_adapter, self.structured_rag_adapter)  # 通过闭包把 rag_adapter 注入节点
+        retrieve_node = build_retrieve_node()
         answer_node = build_answer_node(self.memory)
 
         # 先加节点
@@ -234,6 +243,40 @@ class FinancialRAGAgent:
     @staticmethod
     def _route_after_recovery(state: AgentState) -> str:
         return state.get("recovery_action", "fallback")
+
+    def list_tools(self) -> List[Dict[str, Any]]:
+        """返回已注册且可通过生命周期管理器调用的业务工具。"""
+        return [tool for tool in call_lifecycle.list_registered_tools() if tool["ready"]]
+
+    def invoke_tool(self, tool: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """供编排层或测试直接调用已注册的原子工具。"""
+        empty_checks = {
+            "report_search": lambda value: not value or not value.get("docs", []),
+            "context_expand": lambda value: not value or not value.get("docs", []),
+            "report_catalog": lambda value: not value or not value.get("reports", []),
+        }
+        summarizers = {
+            "report_search": lambda value: {"doc_count": len((value or {}).get("docs", []))},
+            "context_expand": lambda value: {"doc_count": len((value or {}).get("docs", []))},
+            "report_catalog": lambda value: {"report_count": len((value or {}).get("reports", []))},
+            "metric_calculate": lambda value: {
+                "operation": (value or {}).get("operation"),
+                "result": (value or {}).get("result"),
+                "unit": (value or {}).get("unit"),
+            },
+        }
+        outcome = call_lifecycle.execute_registered(
+            tool,
+            arguments,
+            argument_retryable=False,
+            empty_retryable=False,
+            is_empty=empty_checks.get(tool),
+            summarize=summarizers.get(tool),
+        )
+        return {
+            "result": outcome.value,
+            "observation": outcome.observation.model_dump(),
+        }
 
     def chat(self, user_input: str, session_id: str = "default") -> str:
         result = self.graph.invoke(

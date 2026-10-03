@@ -1,15 +1,2 @@
-fastapi
-uvicorn[standard]
-sse-starlette
-langchain
-langgraph
-transformers
-torch
-faiss-cpu
-rank-bm25
-pymupdf
-pydantic
-python-dotenv
-loguru
-httpx
-aiofiles
+# 从项目根目录安装，和 CLI 共用同一份依赖。
+-r ../../requirements.txt

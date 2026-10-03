@@ -34,10 +34,10 @@ def recovery_node(state: AgentState) -> Dict:
         and observation.get("retryable", False)
         and state.get("argument_repair_count", 0)
         < state.get("argument_repair_limit", model_config.ARGUMENT_REPAIR_LIMIT)
-        and tool in {"llm.query_rewrite", "rag_search", "structured_rag_search"}
+        and tool in {"llm.query_rewrite", "report_search", "rag_search", "structured_rag_search"}
     )
     is_useless_retrieval = (
-        tool in {"rag_search", "structured_rag_search"}
+        tool in {"report_search", "rag_search", "structured_rag_search"}
         and not state.get("retrieval_success", False)
         and error_type in {None, ErrorType.EMPTY_RESULT.value}
     )

@@ -16,6 +16,12 @@ call_lifecycle_module = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = call_lifecycle_module
 SPEC.loader.exec_module(call_lifecycle_module)
 
+ATOMIC_MODULE_PATH = PROJECT_ROOT / "agent" / "tools" / "atomic_tools.py"
+ATOMIC_SPEC = importlib.util.spec_from_file_location("atomic_tools_under_test", ATOMIC_MODULE_PATH)
+atomic_tools_module = importlib.util.module_from_spec(ATOMIC_SPEC)
+sys.modules[ATOMIC_SPEC.name] = atomic_tools_module
+ATOMIC_SPEC.loader.exec_module(atomic_tools_module)
+
 CallLifecycle = call_lifecycle_module.CallLifecycle
 CallSpec = call_lifecycle_module.CallSpec
 ErrorType = call_lifecycle_module.ErrorType
@@ -23,12 +29,32 @@ RagSearchArgs = call_lifecycle_module.RagSearchArgs
 StructuredRagSearchArgs = call_lifecycle_module.StructuredRagSearchArgs
 RiskLevel = call_lifecycle_module.RiskLevel
 validate_structured_query = call_lifecycle_module.validate_structured_query
+FinancialAtomicTools = atomic_tools_module.FinancialAtomicTools
 
 
 class HttpFailure(Exception):
     def __init__(self, status_code):
         super().__init__(f"http {status_code}")
         self.status_code = status_code
+
+
+class FakeDocument:
+    def __init__(self, content, metadata):
+        self.page_content = content
+        self.metadata = metadata
+
+
+class FakeAdapter:
+    def __init__(self, kind):
+        self.kind = kind
+        self.calls = []
+
+    def search(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        return {
+            "docs": [{"content": self.kind}],
+            "meta": {"adapter": self.kind},
+        }
 
 
 def search_spec(*, attempts=3, timeout=0.5, risk=RiskLevel.READ_ONLY):
@@ -242,6 +268,81 @@ class CallLifecycleTest(unittest.TestCase):
         )
         self.assertEqual(outcome.observation.status, "success")
         self.assertIsInstance(received[0], dict)
+
+    def test_registered_handler_is_invoked_by_name(self):
+        lifecycle = CallLifecycle(
+            max_concurrency=1,
+            sleep_fn=lambda _: None,
+            random_fn=lambda: 0.0,
+        )
+        lifecycle.register_handler(
+            "metric_calculate",
+            lambda operation, values, precision: {
+                "operation": operation,
+                "result": sum(values),
+                "precision": precision,
+            },
+        )
+        outcome = lifecycle.execute_registered(
+            "metric_calculate",
+            {"operation": "sum", "values": [1, 2, 3], "precision": 2},
+        )
+        self.assertEqual(outcome.observation.status, "success")
+        self.assertEqual(outcome.value["result"], 6)
+
+
+class AtomicToolsTest(unittest.TestCase):
+    def setUp(self):
+        self.simple_adapter = FakeAdapter("simple")
+        self.structured_adapter = FakeAdapter("structured")
+        self.documents = [
+            FakeDocument(
+                f"chunk-{index}",
+                {
+                    "doc_id": "report-1",
+                    "chunk_id": f"report-1-c{index}",
+                    "file_name": "海光信息2024年报.pdf",
+                    "title": "海光信息2024年报",
+                    "company": "海光信息",
+                    "report_date": "2024-12-31",
+                    "page_num": index,
+                },
+            )
+            for index in range(1, 4)
+        ]
+        self.tools = FinancialAtomicTools(
+            self.simple_adapter,
+            self.structured_adapter,
+            self.documents,
+        )
+
+    def test_report_search_selects_expected_adapter(self):
+        simple = self.tools.report_search(query="净利润")
+        structured = self.tools.report_search(
+            query="对比",
+            structured_query={"task_type": "compare", "sub_queries": ["a", "b"]},
+        )
+        self.assertEqual(simple["meta"]["search_kind"], "simple")
+        self.assertEqual(structured["meta"]["search_kind"], "structured")
+        self.assertEqual(len(self.simple_adapter.calls), 1)
+        self.assertEqual(len(self.structured_adapter.calls), 1)
+
+    def test_context_expand_returns_bounded_neighbors(self):
+        result = self.tools.context_expand("report-1", "report-1-c2", before=1, after=1)
+        self.assertEqual([doc["distance"] for doc in result["docs"]], [-1, 0, 1])
+        self.assertEqual(result["docs"][1]["relation"], "target")
+
+    def test_report_catalog_deduplicates_and_filters(self):
+        result = self.tools.report_catalog(company="海光", year="2024")
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["reports"][0]["doc_id"], "report-1")
+
+    def test_metric_calculate_uses_decimal_arithmetic(self):
+        growth = self.tools.metric_calculate("growth_rate", [120, 100], precision=2)
+        margin = self.tools.metric_calculate("gross_margin", [200, 120], precision=2)
+        self.assertEqual(growth["result"], 20.0)
+        self.assertEqual(growth["unit"], "%")
+        self.assertEqual(margin["result"], 40.0)
 
 
 if __name__ == "__main__":

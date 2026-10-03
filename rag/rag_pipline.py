@@ -7,8 +7,8 @@ from pathlib import Path
 from typing import List
 from langchain_core.documents import Document
 
-from document_loaders.pymupdf_texttable_loader import PyMuPDFLoader
-from text_splitters.chinese_splitter import ChineseMarkdownTextSplitter
+from rag.document_loaders.pymupdf_texttable_loader import PyMuPDFLoader
+from rag.text_splitters.chinese_splitter import ChineseMarkdownTextSplitter
 from rag import create_vector_store, save_vector_store
 import sys
 sys.path.append(str(Path(__file__).parent.parent))  # 添加项目根目录到路径
@@ -104,6 +104,7 @@ def run_pdf_to_vector(
             metadata=item["metadata"]
         ))
     import json
+    os.makedirs(save_path, exist_ok=True)
     cache_path = os.path.join(save_path, "all_documents.json")
     with open(cache_path, "w", encoding="utf-8") as f:
         json.dump([

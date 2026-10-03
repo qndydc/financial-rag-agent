@@ -6,6 +6,7 @@ __pycache__/
 .Python
 env/
 venv/
+.venv/
 ENV/
 .env
 
@@ -40,6 +41,8 @@ bm25_*.pkl
 !agent/test/testset.jsonl
 !evaluation/reports/*.json
 !evaluation/reports/*.csv
+!docker/frontend/package.json
+!docker/frontend/package-lock.json
 data/
 dataset/
 docs/
@@ -51,3 +54,6 @@ log/
 *.log
 tmp/
 temp/
+#项目解析
+.ua/
+金融RAG简历逐句三问.md

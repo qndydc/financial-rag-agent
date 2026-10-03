@@ -13,9 +13,9 @@ class RagConfig:
     # 文档路径配置
     # ---------------------------
     # 原始 PDF 存放目录
-    RAW_PDF_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "dataset/raw_pdf")
+    RAW_PDF_DIR = os.getenv("RAW_PDF_DIR", os.path.join(os.path.dirname(os.path.dirname(__file__)), "dataset/raw_pdf"))
     # 向量库持久化路径
-    VECTOR_STORE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "dataset/vector_store")
+    VECTOR_STORE_DIR = os.getenv("VECTOR_STORE_DIR", os.path.join(os.path.dirname(os.path.dirname(__file__)), "dataset/vector_store"))
 
     # ---------------------------
     # PDF 解析 & DeepDoc 配置

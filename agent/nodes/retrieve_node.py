@@ -6,18 +6,9 @@ from agent.state.agent_state import AgentState
 from configs import model_config
 
 
-def build_retrieve_node(rag_adapter, structured_rag_adapter):
+def build_retrieve_node():
     """
-    通过闭包把 rag_adapter 注入节点
-
-    说明：
-    1. 这里只接受结构化检索对象 structured_query
-    2. 不再兼容旧版 rewritten_query / user_input 直传检索
-    3. rag_adapter.search(query=structured_query) 需要返回：
-       {
-           "docs": [...],
-           "meta": {...}
-       }
+    通过已注册的 report_search 原子工具执行普通或结构化检索。
     """
 
     def retrieve_node(state: AgentState) -> Dict[str, Any]:
@@ -26,65 +17,33 @@ def build_retrieve_node(rag_adapter, structured_rag_adapter):
         user_input = state["user_input"]
         task_type = structured_query.get("task_type", "")
 
-        # 定义一个简单状态，简单状态直接普通查询，复杂状态走结构化查询
-        if task_type != "fact":  # 如果不是普通查询，就走结构化检索
-            def invoke_search(structured_query, mode, use_reranker):
-                return structured_rag_adapter.search(
-                    structured_query,
-                    mode=mode,
-                    use_reranker=use_reranker,
-                )
-
-            outcome = call_lifecycle.execute(
-                "structured_rag_search",
-                invoke_search,
-                {
-                    "structured_query": structured_query,
-                    "mode": "hybrid",
-                    "use_reranker": True,
-                },
-                argument_retryable=(
-                    state.get("argument_repair_count", 0)
-                    < state.get("argument_repair_limit", model_config.ARGUMENT_REPAIR_LIMIT)
-                ),
-                empty_retryable=(
-                    state.get("generalization_count", 0)
-                    < state.get("generalization_limit", model_config.EMPTY_RESULT_RETRY_LIMIT)
-                ),
-                is_empty=lambda value: not value or not value.get("docs", []),
-                summarize=lambda value: {"doc_count": len((value or {}).get("docs", []))},
-            )
-            print(f"[retrieve_node] 使用结构化检索，structured_query = {structured_query}")
-        else:
-            query = state_rewritten_query or user_input
-
-            def invoke_search(query, mode, use_reranker):
-                return rag_adapter.search(
-                    query,
-                    mode=mode,
-                    use_reranker=use_reranker,
-                )
-
-            outcome = call_lifecycle.execute(
-                "rag_search",
-                invoke_search,
-                {
-                    "query": query,
-                    "mode": "hybrid",
-                    "use_reranker": True,
-                },
-                argument_retryable=(
-                    state.get("argument_repair_count", 0)
-                    < state.get("argument_repair_limit", model_config.ARGUMENT_REPAIR_LIMIT)
-                ),
-                empty_retryable=(
-                    state.get("generalization_count", 0)
-                    < state.get("generalization_limit", model_config.EMPTY_RESULT_RETRY_LIMIT)
-                ),
-                is_empty=lambda value: not value or not value.get("docs", []),
-                summarize=lambda value: {"doc_count": len((value or {}).get("docs", []))},
-            )
-            print(f"[retrieve_node] 使用普通检索，query = {query}")
+        query = state_rewritten_query or user_input
+        outcome = call_lifecycle.execute_registered(
+            "report_search",
+            {
+                "query": query,
+                "structured_query": structured_query,
+                "mode": "hybrid",
+                "use_reranker": True,
+            },
+            argument_retryable=(
+                state.get("argument_repair_count", 0)
+                < state.get("argument_repair_limit", model_config.ARGUMENT_REPAIR_LIMIT)
+            ),
+            empty_retryable=(
+                state.get("generalization_count", 0)
+                < state.get("generalization_limit", model_config.EMPTY_RESULT_RETRY_LIMIT)
+            ),
+            is_empty=lambda value: not value or not value.get("docs", []),
+            summarize=lambda value: {
+                "doc_count": len((value or {}).get("docs", [])),
+                "search_kind": ((value or {}).get("meta", {}) or {}).get("search_kind", ""),
+            },
+        )
+        print(
+            "[retrieve_node] 使用 report_search，"
+            f"kind={'structured' if task_type != 'fact' else 'simple'}，query={query}"
+        )
 
         observation = outcome.observation.model_dump()
         result = outcome.value or {}

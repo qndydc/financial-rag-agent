@@ -10,9 +10,19 @@ import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Dict, List, Literal, Optional, Type
+from typing import Any, Callable, Dict, List, Literal, Optional, Type, Union
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictFloat,
+    StrictInt,
+    StringConstraints,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from typing_extensions import Annotated
 
 from configs import model_config
@@ -117,6 +127,76 @@ class StructuredRagSearchArgs(BaseModel):
     use_reranker: bool = True
 
 
+class ReportSearchArgs(BaseModel):
+    """统一普通检索与结构化检索的业务工具参数。"""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    query: Optional[QueryText] = None
+    structured_query: Optional[StructuredQueryPayload] = None
+    mode: Literal["vector", "bm25", "hybrid"] = "hybrid"
+    use_reranker: bool = True
+
+    @model_validator(mode="after")
+    def ensure_query(self) -> "ReportSearchArgs":
+        if self.query is None and self.structured_query is None:
+            raise ValueError("query 和 structured_query 至少提供一个")
+        return self
+
+
+class ContextExpandArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    doc_id: QueryText
+    chunk_id: QueryText
+    before: int = Field(default=1, ge=0, le=3)
+    after: int = Field(default=1, ge=0, le=3)
+
+
+class ReportCatalogArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    company: Optional[QueryText] = None
+    year: Optional[Annotated[str, StringConstraints(pattern=r"^\d{4}$")]] = None
+    limit: int = Field(default=20, ge=1, le=100)
+
+
+MetricNumber = Union[StrictInt, StrictFloat]
+
+
+class MetricCalculateArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    operation: Literal["sum", "difference", "ratio", "growth_rate", "gross_margin"]
+    values: List[MetricNumber] = Field(min_length=1, max_length=20)
+    precision: int = Field(default=4, ge=0, le=8)
+
+    @field_validator("values")
+    @classmethod
+    def reject_non_finite_values(cls, values: List[MetricNumber]) -> List[MetricNumber]:
+        if any(not (-float("inf") < float(value) < float("inf")) for value in values):
+            raise ValueError("values 只能包含有限数值")
+        return values
+
+    @model_validator(mode="after")
+    def validate_operation_arity(self) -> "MetricCalculateArgs":
+        expected = {
+            "difference": 2,
+            "ratio": 2,
+            "growth_rate": 2,
+            "gross_margin": 2,
+        }
+        if self.operation == "sum" and not self.values:
+            raise ValueError("sum 至少需要一个数值")
+        if self.operation in expected and len(self.values) != expected[self.operation]:
+            raise ValueError(f"{self.operation} 必须提供两个数值")
+        if self.operation in {"ratio", "growth_rate"} and float(self.values[1]) == 0:
+            raise ValueError(f"{self.operation} 的基准值不能为 0")
+        if self.operation == "gross_margin" and float(self.values[0]) == 0:
+            raise ValueError("gross_margin 的收入不能为 0")
+        return self
+
+
 @dataclass(frozen=True)
 class CallSpec:
     name: str
@@ -124,6 +204,7 @@ class CallSpec:
     risk_level: RiskLevel
     timeout_seconds: float
     max_attempts: int
+    description: str = ""
 
 
 @dataclass
@@ -174,6 +255,7 @@ class CallLifecycle:
         random_fn: Callable[[], float] = random.random,
     ) -> None:
         self._specs: Dict[str, CallSpec] = {}
+        self._handlers: Dict[str, Callable[..., Any]] = {}
         self._sleep = sleep_fn
         self._random = random_fn
         self._backoff_base = (
@@ -191,8 +273,48 @@ class CallLifecycle:
         for spec in specs or _default_specs():
             self.register(spec)
 
-    def register(self, spec: CallSpec) -> None:
+    def register(self, spec: CallSpec, handler: Optional[Callable[..., Any]] = None) -> None:
         self._specs[spec.name] = spec
+        if handler is not None:
+            self._handlers[spec.name] = handler
+
+    def register_handler(self, tool: str, handler: Callable[..., Any]) -> None:
+        if tool not in self._specs:
+            raise ValueError(f"工具尚未注册 CallSpec：{tool}")
+        if not callable(handler):
+            raise TypeError("handler 必须是可调用对象")
+        self._handlers[tool] = handler
+
+    def list_registered_tools(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "name": name,
+                "description": spec.description,
+                "risk_level": spec.risk_level.value,
+                "ready": name in self._handlers,
+            }
+            for name, spec in self._specs.items()
+            if not name.startswith("llm.")
+        ]
+
+    def execute_registered(
+        self,
+        tool: str,
+        args: Dict[str, Any],
+        **kwargs: Any,
+    ) -> CallOutcome:
+        handler = self._handlers.get(tool)
+        if handler is None:
+            started = time.monotonic()
+            return self._failure(
+                tool,
+                ErrorType.TOOL_NOT_FOUND,
+                "工具未绑定执行函数",
+                started,
+                attempts=0,
+                retryable=False,
+            )
+        return self.execute(tool, handler, args, **kwargs)
 
     def execute(
         self,
@@ -379,6 +501,38 @@ def _default_specs() -> List[CallSpec]:
         CallSpec("llm.answer", LLMCallArgs, RiskLevel.MODEL, llm_timeout, attempts),
         CallSpec("rag_search", RagSearchArgs, RiskLevel.READ_ONLY, tool_timeout, attempts),
         CallSpec("structured_rag_search", StructuredRagSearchArgs, RiskLevel.READ_ONLY, tool_timeout, attempts),
+        CallSpec(
+            "report_search",
+            ReportSearchArgs,
+            RiskLevel.READ_ONLY,
+            tool_timeout,
+            attempts,
+            "统一执行普通或结构化研报检索",
+        ),
+        CallSpec(
+            "context_expand",
+            ContextExpandArgs,
+            RiskLevel.READ_ONLY,
+            tool_timeout,
+            attempts,
+            "按 doc_id/chunk_id 读取相邻研报片段",
+        ),
+        CallSpec(
+            "report_catalog",
+            ReportCatalogArgs,
+            RiskLevel.READ_ONLY,
+            tool_timeout,
+            attempts,
+            "查询当前知识库中的研报清单",
+        ),
+        CallSpec(
+            "metric_calculate",
+            MetricCalculateArgs,
+            RiskLevel.READ_ONLY,
+            tool_timeout,
+            1,
+            "执行受限的金融指标算术计算",
+        ),
     ]
 
 

@@ -1,5 +1,5 @@
-# 使用官方 Node.js 20 版本
-FROM node:20-bookworm
+# Vite 使用 Node.js 22。
+FROM node:22-bookworm
 
 # 设置工作目录为 /app
 WORKDIR /app
@@ -8,7 +8,7 @@ WORKDIR /app
 COPY package*.json ./
 
 # 安装依赖
-RUN npm install
+RUN npm ci
 
 # 将其余源代码拷贝到容器中
 COPY . .

@@ -12,11 +12,7 @@ from langchain_core.callbacks.manager import Callbacks
 from langchain_core.documents import Document
 from langchain_core.documents import BaseDocumentCompressor  # 最新官方基类
 
-# pydantic 兼容新旧版
-try:
-    from pydantic.v1 import Field, PrivateAttr
-except ImportError:
-    from pydantic import Field, PrivateAttr
+from pydantic import Field, PrivateAttr
 
 from sentence_transformers import CrossEncoder
 
